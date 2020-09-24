@@ -26,6 +26,7 @@ from imageio import imwrite
 
 import shutil
 import sol4_utils
+from copy import deepcopy
 
 def get_lap_derivate(image):
     derivate_vev = np.array([1, 0, -1])
@@ -91,16 +92,6 @@ def find_features(pyr):
   positions = spread_out_corners(pyr[0], K, K, R)
   return harris_corner_detector(pyr[0]), positions
 
-def get_2max(vec):
-  assert len(vec) == 2
-  _maxes = [ (0,vec[0]), (1,vec[1]) ]
-  for j, val in enumerate( vec[2:] ):
-    _maxes.append((j+2,val))
-    _maxes.remove( min( _maxes, key=lambda _index, val : val ) )
-  ret = np.zeros( shape=vec.shape)
-  for j, val in _maxes:
-    ret[j] = val
-  return ret        
 
 def match_features(desc1, desc2, min_score):
   """
@@ -112,13 +103,34 @@ def match_features(desc1, desc2, min_score):
               1) An array with shape (M,) and dtype int of matching indices in desc1.
               2) An array with shape (M,) and dtype int of matching indices in desc2.
   """
-  score = np.einsum( 'kil,jil->k,j', desc1, desc2)
+  score = np.einsum( 'kil,jil->kj', desc1, desc2)
   score[ score < min_score] = 0.0
+  
+  def get_2max(vec):
+    assert len(vec) == 2
+    _maxes = [ (0,vec[0]), (1,vec[1]) ]
+    for j, val in enumerate( vec[2:] ):
+      _maxes.append((j+2,val))
+      _maxes.remove( min( _maxes, key=lambda _index, val : val ) )
+    ret = { }
+    for j, val in _maxes:
+      ret[j] = val
+    return ret        
+  
   score_filter_row = np.array(map(get_2max, score))
   score_filter_col = np.array(map(get_2max, score.transpose()))
-  indices = (score_filter_col.transpose() == score_filter_row) 
-  pass
+  indices = score_filter_col.transpose() == score_filter_row
 
+  def union( _score_filter_row, _score_filter_col  ):
+    _score_filter_row, _score_filter_col = deepcopy(_score_filter_row), deepcopy(_score_filter_col)
+    for i, row in enumerate( _score_filter_row ):
+      for j, cell in row.items():
+        if i not in _score_filter_col[j]:
+          del _score_filter_row[i][j]
+    return np.array( list(map(lambda _dict : _dict.keys(), _score_filter_row)), dtype=np.int ) 
+
+  score_filter_row, score_filter_col = union(score_filter_row, score_filter_col ), union(score_filter_col, score_filter_row) 
+  return score_filter_row, score_filter_col
 
 def apply_homography(pos1, H12):
   """
@@ -127,7 +139,11 @@ def apply_homography(pos1, H12):
   :param H12: A 3x3 homography matrix.
   :return: An array with the same shape as pos1 with [x,y] point coordinates obtained from transforming pos1 using H12.
   """
-  pass
+  def rt_point( point ):
+    x,y = point
+    x, y, z = H12 * np.array( [x, y, 1])
+    return np.array( [x, y] )/ z
+  return np.vectorize( rt_point )( pos1 ) 
 
 
 def ransac_homography(points1, points2, num_iter, inlier_tol, translation_only=False):
@@ -143,6 +159,13 @@ def ransac_homography(points1, points2, num_iter, inlier_tol, translation_only=F
               2) An Array with shape (S,) where S is the number of inliers,
                   containing the indices in pos1/pos2 of the maximal set of inlier matches found.
   """
+  min_score = 0.5
+  matched1, matched2 = match_features(points1, points2, min_score)
+  for i in numpy.random.choice( matched1, size=num_iter, replace=False):
+    H = estimate_rigid_transform(points1[i], points2[i])
+    apply_homography(points1[i], points2[i])
+
+
   pass
 
 
@@ -158,7 +181,7 @@ def display_matches(im1, im2, points1, points2, inliers):
   pass
 
 
-
+from itertools import accumulate
 def accumulate_homographies(H_succesive, m):
   """
   Convert a list of succesive homographies to a 
@@ -171,8 +194,12 @@ def accumulate_homographies(H_succesive, m):
   :return: A list of M 3x3 homography matrices, 
     where H2m[i] transforms points from coordinate system i to coordinate system m
   """ 
-  pass
 
+  def conicdate( prev_matrix, next_matrix ):
+    ret = prev_matrix @ next_matrix
+    return ret/ret[2][2]
+  return reversed( accumulate( reversed( H_succesive[:m+1] ), conicdate )) + np.eye(3)
+  
 
 def compute_bounding_box(homography, w, h):
   """
