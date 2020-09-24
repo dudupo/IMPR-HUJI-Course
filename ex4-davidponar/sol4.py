@@ -42,7 +42,6 @@ def create_respone(Intensity):
          lambda raw : list( map(
               lambda cell : respone (cell) , raw)) ,  Intensity)))
 
-
 def harris_corner_detector(im):
   """
   Detects harris corners.
@@ -57,8 +56,8 @@ def harris_corner_detector(im):
   
 
 def normalize( vec ):
-  ret = np.linalg.norm(vec)
-  return vec / ret if ret != 0 else ret
+  _norm = np.linalg.norm(vec)
+  return vec / _norm if _norm != 0 else vec
 
 def sample_descriptor(im, pos, desc_rad):
   """
@@ -76,7 +75,6 @@ def sample_descriptor(im, pos, desc_rad):
     hist = np.array( [ [x, y] ] )
     win = np.vectorize(lambda p : im[ transform_level3(p + hist) ]) ( circle_matrix ) 
     return normalize( win - np.average( win )  ) 
-
   return np.vectorize(  get_norm_bunch  ) ( pos )
   
 
@@ -93,6 +91,16 @@ def find_features(pyr):
   positions = spread_out_corners(pyr[0], K, K, R)
   return harris_corner_detector(pyr[0]), positions
 
+def get_2max(vec):
+  assert len(vec) == 2
+  _maxes = [ (0,vec[0]), (1,vec[1]) ]
+  for j, val in enumerate( vec[2:] ):
+    _maxes.append((j+2,val))
+    _maxes.remove( min( _maxes, key=lambda _index, val : val ) )
+  ret = np.zeros( shape=vec.shape)
+  for j, val in _maxes:
+    ret[j] = val
+  return ret        
 
 def match_features(desc1, desc2, min_score):
   """
@@ -104,6 +112,11 @@ def match_features(desc1, desc2, min_score):
               1) An array with shape (M,) and dtype int of matching indices in desc1.
               2) An array with shape (M,) and dtype int of matching indices in desc2.
   """
+  score = np.einsum( 'kil,jil->k,j', desc1, desc2)
+  score[ score < min_score] = 0.0
+  score_filter_row = np.array(map(get_2max, score))
+  score_filter_col = np.array(map(get_2max, score.transpose()))
+  indices = (score_filter_col.transpose() == score_filter_row) 
   pass
 
 
