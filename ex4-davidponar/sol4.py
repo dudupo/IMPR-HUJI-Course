@@ -29,19 +29,16 @@ import sol4_utils
 from copy import deepcopy
 
 def get_lap_derivate(image):
-    derivate_vev = np.array([1, 0, -1])
-    Ix, Iy = *( imcov(image,vec) for vec in [ derivate_vev, derivate_vev.transpose() ] ) 
-    Ix = np.tensordot(  Ix , np.array( [[1 , 0 ], [0 , 0 ]]) ,axes=0)
-    Iy = np.tensordot(  Iy , np.array( [[0 , 0 ], [0 , 1 ]]) ,axes=0)
-    return np.einsum('ijk,ijn->ijkn', Ix, Iy)
-    
-def respone( _matrix ):
-    return np.linalg.det( _matrix ) - 0.04 * np.matrix.trace( _matrix )
+    derivate_vev = np.array([[1, 0, -1]], dtype=np.float64 )
+    Ix, Iy = ( imconv(image,vec) for vec in [ derivate_vev, derivate_vev.transpose() ] ) 
+    return Ix, Iy
 
 def create_respone(Intensity):
-    return np.array(list( map(
-         lambda raw : list( map(
-              lambda cell : respone (cell) , raw)) ,  Intensity)))
+  Ix , Iy  = Intensity
+  IxIx = sol4_utils.blur_spatial(Ix*Ix,3)
+  IyIy = sol4_utils.blur_spatial(Iy*Iy,3)
+  IxIy = sol4_utils.blur_spatial(Ix*Iy,3)
+  return IxIx*IyIy - IxIy * IxIy  - 0.04 * (IxIx + IyIy) * (IxIx + IyIy) 
 
 def harris_corner_detector(im):
   """
@@ -53,12 +50,14 @@ def harris_corner_detector(im):
   return np.argwhere(
         non_maximum_suppression(
             create_respone(
-                get_lap_derivate(im))))
+                get_lap_derivate(im))).T)
   
 
 def normalize( vec ):
   _norm = np.linalg.norm(vec)
   return vec / _norm if _norm != 0 else vec
+
+from itertools import product
 
 def sample_descriptor(im, pos, desc_rad):
   """
@@ -69,11 +68,11 @@ def sample_descriptor(im, pos, desc_rad):
   :return: A 3D array with shape (N,K,K) containing the ith descriptor at desc[i,:,:].
   """
   rad_vec = np.array( list(range(-desc_rad , desc_rad)) )
-  circle_matrix = np.cartesian( rad_vec, rad_vec )
-  transform_level3 = lambda point : point // 4
+  circle_matrix = np.array(list(product( rad_vec, rad_vec )))
+  transform_level3 = lambda point : int(point / 4)
 
-  def get_norm_bunch( x,y ):
-    hist = np.array( [ [x, y] ] )
+  def get_norm_bunch( point ):
+    hist = np.array( [ point ] )
     win = np.vectorize(lambda p : im[ transform_level3(p + hist) ]) ( circle_matrix ) 
     return normalize( win - np.average( win )  ) 
   return np.vectorize(  get_norm_bunch  ) ( pos )
@@ -90,7 +89,7 @@ def find_features(pyr):
   """
   K, R = 7, 3 
   positions = spread_out_corners(pyr[0], K, K, R)
-  return harris_corner_detector(pyr[0]), positions
+  return harris_corner_detector(pyr[0]), sample_descriptor(pyr[2], positions, R)
 
 
 def match_features(desc1, desc2, min_score):
@@ -103,33 +102,41 @@ def match_features(desc1, desc2, min_score):
               1) An array with shape (M,) and dtype int of matching indices in desc1.
               2) An array with shape (M,) and dtype int of matching indices in desc2.
   """
-  score = np.einsum( 'kil,jil->kj', desc1, desc2)
+  print(desc1.shape, desc2.shape)
+  print(desc1)
+  score = np.einsum( 'ki,ji->kj', desc1, desc2)
   score[ score < min_score] = 0.0
   
   def get_2max(vec):
-    assert len(vec) == 2
+    # assert len(vec) == 2
     _maxes = [ (0,vec[0]), (1,vec[1]) ]
     for j, val in enumerate( vec[2:] ):
       _maxes.append((j+2,val))
-      _maxes.remove( min( _maxes, key=lambda _index, val : val ) )
+      _maxes.remove( min( _maxes, key=lambda item : item[1] ) )
     ret = { }
     for j, val in _maxes:
       ret[j] = val
     return ret        
   
-  score_filter_row = np.array(map(get_2max, score))
-  score_filter_col = np.array(map(get_2max, score.transpose()))
+  score_filter_row = np.array(list((map(get_2max, score))))
+  score_filter_col = np.array(list(map(get_2max, score.transpose())))
   indices = score_filter_col.transpose() == score_filter_row
 
   def union( _score_filter_row, _score_filter_col  ):
-    _score_filter_row, _score_filter_col = deepcopy(_score_filter_row), deepcopy(_score_filter_col)
+    __score_filter_row, __score_filter_col = deepcopy(_score_filter_row), deepcopy(_score_filter_col)
+    # print(_score_filter_row)
+    # print(_score_filter_col)
+    ret = []
     for i, row in enumerate( _score_filter_row ):
       for j, cell in row.items():
-        if i not in _score_filter_col[j]:
-          del _score_filter_row[i][j]
-    return np.array( list(map(lambda _dict : _dict.keys(), _score_filter_row)), dtype=np.int ) 
+        if i in _score_filter_col[j]:
+          # del __score_filter_row[i][j]
+          ret.append( j )
+    # print( __score_filter_row )
+    return np.array(ret) # np.array( list(map(lambda _dict : [ int(_key) for _key in _dict.keys() ] , __score_filter_row)) )  
 
   score_filter_row, score_filter_col = union(score_filter_row, score_filter_col ), union(score_filter_col, score_filter_row) 
+  print(score_filter_row)
   return score_filter_row, score_filter_col
 
 def apply_homography(pos1, H12):
@@ -343,7 +350,7 @@ class PanoramicVideoGenerator:
     """
     self.file_prefix = file_prefix
     self.files = [os.path.join(data_dir, '%s%03d.jpg' % (file_prefix, i + 1)) for i in range(num_images)]
-    self.files = list(filter(os.path.exists, self.files))
+    self.files = list(filter(os.path.exists, self.files))[:2]
     self.panoramas = None
     self.homographies = None
     print('found %d images' % len(self.files))
@@ -369,6 +376,7 @@ class PanoramicVideoGenerator:
 
       # Find matching feature points.
       ind1, ind2 = match_features(desc1, desc2, .7)
+      print(ind1 , ind2 )
       points1, points2 = points1[ind1, :], points2[ind2, :]
 
       # Compute homography using RANSAC.
