@@ -69,13 +69,18 @@ def sample_descriptor(im, pos, desc_rad):
   """
   rad_vec = np.array( list(range(-desc_rad , desc_rad)) )
   circle_matrix = np.array(list(product( rad_vec, rad_vec )))
-  transform_level3 = lambda point : int(point / 4)
+  transform_level3 = lambda point : (point / 4).astype(np.int)
 
   def get_norm_bunch( point ):
-    hist = np.array( [ point ] )
-    win = np.vectorize(lambda p : im[ transform_level3(p + hist) ]) ( circle_matrix ) 
+    hist = np.array( point )
+
+    def move_circle(p):
+      x,y = transform_level3(p + hist) 
+      return im[y][x]
+
+    win = np.array(list(map(move_circle, circle_matrix )))
     return normalize( win - np.average( win )  ) 
-  return np.vectorize(  get_norm_bunch  ) ( pos )
+  return np.array(list(map(  get_norm_bunch ,pos )))
   
 
 def find_features(pyr):
@@ -130,8 +135,8 @@ def match_features(desc1, desc2, min_score):
     for i, row in enumerate( _score_filter_row ):
       for j, cell in row.items():
         if i in _score_filter_col[j]:
-          # del __score_filter_row[i][j]
           ret.append( j )
+          # del __score_filter_row[i][j]
     # print( __score_filter_row )
     return np.array(ret) # np.array( list(map(lambda _dict : [ int(_key) for _key in _dict.keys() ] , __score_filter_row)) )  
 
