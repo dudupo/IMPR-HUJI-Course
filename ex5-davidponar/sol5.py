@@ -1,8 +1,8 @@
 from keras import layers, Input, Model
 import keras
 import numpy as np
-from random import choice
-from sol5_utils import read_image, REPRESENTATION_GRY
+from random import choice, randint
+from sol5_utils import *
 
 def load_dataset(filenames, batch_size, corruption_func, crop_size):
 
@@ -14,39 +14,38 @@ def load_dataset(filenames, batch_size, corruption_func, crop_size):
             _filename = choice(filenames)
             if _filename not in cache:
                 image = read_image( _filename ,REPRESENTATION_GRY) 
+                image = np.array( [ [ [ image[y][x] ] for x in range( image.shape[1] )] for y in range(image.shape[0])] )
                 
-                # todo, should check what is the meaning of 
-                #   shape (width, hight, *1* ), currently I returns 
-                #   shape of (width, hight)
-                
-                cache[ _filename ] = ( image, corruption_func(image) ) 
+                cache[ _filename ] = ( image - 0.5*np.ones(image.shape),
+                 corruption_func(image) - 0.5*np.ones(image.shape) ) 
 
+            for i in range(2):                
+                batch[i].append( cache[ _filename ][i])
+
+            _shape = batch[0][-1].shape
+            s_width, s_height = randint(0,  _shape[0] - crop_size), randint(0,  _shape[1] - crop_size)  
+            
             for i in range(2):
-                
-                #
-                # crop and crate patchs. 
-                #
-                
-                batch[i].append( cache[ _filename ][i].reshape( crop_size )  )
-        
+                batch[i][-1] = batch[i][-1][ s_width:s_width+crop_size, s_height:s_height+crop_size ]
+
         yield np.array(batch)
 
 
 def resblock(input_tensor, num_channels):
-    x = layers.Conv2D( )(input_tensor)
+    x = layers.Conv2D( num_channels , (3 , 3), padding ='same')(input_tensor)
     x = layers.Activation("relu")(x)
-    x = layers.Conv2D( )(x)
+    x = layers.Conv2D( num_channels , (3 , 3), padding ='same')(x)
     layers.Add()([x, input_tensor])
     x = layers.Activation("relu")(x)
     return x
 
 def build_nn_model(height, width, num_channels, num_res_blocks):
     input_tensor = Input(shape=(height, width, 1))
-    x = layers.Conv2D( "shape->num_channels" )(input_tensor)
+    x = layers.Conv2D( num_channels , (3 , 3), padding ='same' )(input_tensor)
     x = layers.Activation("relu")(x)
     for _ in range(num_res_blocks):
         x = resblock(x, num_channels)
-    x = layers.Conv2D( )(x)
+    x = layers.Conv2D( 1 , (3 , 3), padding ='same' )(x)
     layers.Add()([x, input_tensor])
     x = layers.Activation("relu")(x) 
     return Model(input_tensor, x)
@@ -57,16 +56,16 @@ def train_model(model, images, corruption_func, batch_size, steps_per_epoch, num
     data_generator = load_dataset(images, batch_size, corruption_func, crop_size)
     validation_data = [ next(data_generator) for _ in range(num_valid_samples)]
     model.compile(optimizer=keras.optimizers.Adam(beta_2=0.9),loss="mean_squared_error")
-    model.fit(data_generator, epochs=num_epochs, callbacks=callbacks, validation_data=validation_data)
+    model.fit(data_generator, steps_per_epoch=steps_per_epoch, epochs=num_epochs, validation_data=validation_data)
 
 def restore_image(corrupted_image, base_model):
-    input_tensor = Input(shape=(**corrupted_image.shape, 1))
+    input_tensor = Input(shape=corrupted_image.shape)
     
     #
     #   clipping
     #  
     
-    return Model(inputs=input_tensor, outputs=base_model(input_tensor) ).predict()
+    return Model(inputs=input_tensor, outputs=base_model(input_tensor) ).predict() 
     
 
 def add_gaussian_noise(image, min_sigma, max_sigma):
@@ -75,7 +74,7 @@ def add_gaussian_noise(image, min_sigma, max_sigma):
     return np.around(image * 255)/255
 
 def learn_denoising_model(num_res_blocks=5, quick_mode=False):
-    images = sol5_utils.images_for_denoising()
+    images = images_for_denoising()
     num_channels = 48
     height, width = 24 ,24 
     batch_size, steps_per_epoch, num_epochs, num_valid_samples =\
@@ -99,7 +98,7 @@ def random_motion_blur(image, list_of_kernel_sizes):
     return image
 
 def learn_deblurring_model(num_res_blocks=5, quick_mode=False):
-    images = sol5_utils.images_for_deblurring()
+    images = images_for_deblurring()
     num_channels = 32
     height, width = 16 ,16 
     batch_size, steps_per_epoch, num_epochs, num_valid_samples =\
