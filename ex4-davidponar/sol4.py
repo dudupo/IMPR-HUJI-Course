@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 
 from scipy.ndimage.morphology import generate_binary_structure
 from scipy.ndimage.filters import maximum_filter
-from scipy.ndimage import label, center_of_mass
+from scipy.ndimage import label, center_of_mass, map_coordinates
 from scipy.ndimage.filters import convolve as imconv 
 from imageio import imwrite
 
@@ -30,7 +30,7 @@ from copy import deepcopy
 
 def get_lap_derivate(image):
     derivate_vev = np.array([[1, 0, -1]], dtype=np.float64 )
-    Ix, Iy = ( imconv(image,vec) for vec in [ derivate_vev, derivate_vev.transpose() ] ) 
+    Ix, Iy = ( imconv(image,vec, mode='constant') for vec in [ derivate_vev, derivate_vev.transpose() ] ) 
     return Ix, Iy
 
 def create_respone(Intensity):
@@ -67,20 +67,19 @@ def sample_descriptor(im, pos, desc_rad):
   :param desc_rad: "Radius" of descriptors to compute.
   :return: A 3D array with shape (N,K,K) containing the ith descriptor at desc[i,:,:].
   """
-  rad_vec = np.array( list(range(-desc_rad , desc_rad)) )
-  circle_matrix = np.array(list(product( rad_vec, rad_vec )))
-  transform_level3 = lambda point : (point / 4).astype(np.int)
 
-  def get_norm_bunch( point ):
-    hist = np.array( point )
-
-    def move_circle(p):
-      x,y = transform_level3(p + hist) 
-      return im[y][x]
-
-    win = np.array(list(map(move_circle, circle_matrix )))
-    return normalize( win - np.average( win )  ) 
-  return np.array(list(map(  get_norm_bunch ,pos )))
+  ret = [ ]
+  for point in pos:
+    ret.append([])
+    for x in range( -desc_rad, desc_rad+1 ):
+      ret[-1].append([])
+      for y in range( -desc_rad, desc_rad+1 ):
+        _x, _y = (point + np.array([x,y]))//4
+        ret[-1][-1].append( im[_y][_x] )
+    ret[-1] = np.array(ret[-1])
+    mu = np.mean(ret[-1]) 
+    ret[-1] = normalize( ret[-1] - mu  )
+  return np.array(ret)
   
 
 def find_features(pyr):
@@ -92,9 +91,9 @@ def find_features(pyr):
                  These coordinates are provided at the pyramid level pyr[0].
               2) A feature descriptor array with shape (N,K,K)
   """
-  K, R = 7, 3 
+  K, R = 7, 14
   positions = spread_out_corners(pyr[0], K, K, R)
-  return harris_corner_detector(pyr[0]), sample_descriptor(pyr[2], positions, R)
+  return positions, sample_descriptor(pyr[2], positions, 14)
 
 
 def match_features(desc1, desc2, min_score):
@@ -107,42 +106,33 @@ def match_features(desc1, desc2, min_score):
               1) An array with shape (M,) and dtype int of matching indices in desc1.
               2) An array with shape (M,) and dtype int of matching indices in desc2.
   """
-  print(desc1.shape, desc2.shape)
-  print(desc1)
-  score = np.einsum( 'ki,ji->kj', desc1, desc2)
-  score[ score < min_score] = 0.0
+  score = np.einsum( 'kim,jim->kj', desc1, desc2)
   
   def get_2max(vec):
-    # assert len(vec) == 2
-    _maxes = [ (0,vec[0]), (1,vec[1]) ]
+    _maxes = [ (0,vec[0]) , (1,vec[1]) ]
     for j, val in enumerate( vec[2:] ):
       _maxes.append((j+2,val))
       _maxes.remove( min( _maxes, key=lambda item : item[1] ) )
     ret = { }
     for j, val in _maxes:
-      ret[j] = val
-    return ret        
+      if val > min_score:
+        ret[j] = val
+    return ret     
   
   score_filter_row = np.array(list((map(get_2max, score))))
   score_filter_col = np.array(list(map(get_2max, score.transpose())))
-  indices = score_filter_col.transpose() == score_filter_row
+  score[ score < min_score] = 0.0
 
   def union( _score_filter_row, _score_filter_col  ):
-    __score_filter_row, __score_filter_col = deepcopy(_score_filter_row), deepcopy(_score_filter_col)
-    # print(_score_filter_row)
-    # print(_score_filter_col)
-    ret = []
+    ret1, ret2 = [] , []
     for i, row in enumerate( _score_filter_row ):
       for j, cell in row.items():
-        if i in _score_filter_col[j]:
-          ret.append( j )
-          # del __score_filter_row[i][j]
-    # print( __score_filter_row )
-    return np.array(ret) # np.array( list(map(lambda _dict : [ int(_key) for _key in _dict.keys() ] , __score_filter_row)) )  
+        if cell > 0 and  i in _score_filter_col[j] and _score_filter_col[j][i] > 0:
+          ret1.append( i )
+          ret2.append( j )
+    return np.array(ret1), np.array(ret2)  # np.array( list(map(lambda _dict : [ int(_key) for _key in _dict.keys() ] , __score_filter_row)) )  
 
-  score_filter_row, score_filter_col = union(score_filter_row, score_filter_col ), union(score_filter_col, score_filter_row) 
-  print(score_filter_row)
-  return score_filter_row, score_filter_col
+  return union(score_filter_row, score_filter_col )
 
 def apply_homography(pos1, H12):
   """
@@ -151,12 +141,13 @@ def apply_homography(pos1, H12):
   :param H12: A 3x3 homography matrix.
   :return: An array with the same shape as pos1 with [x,y] point coordinates obtained from transforming pos1 using H12.
   """
-  def rt_point( point ):
-    x,y = point
-    x, y, z = H12 * np.array( [x, y, 1])
-    return np.array( [x, y] )/ z
-  return np.vectorize( rt_point )( pos1 ) 
+  positions = np.hstack((pos1, np.ones(shape=(pos1.shape[0], 1)))).transpose()
+  ret = (H12 @ positions)
+  z_vals = ret[-1]
+  return (ret[:-1] /z_vals).transpose() 
 
+
+from operator import __abs__
 
 def ransac_homography(points1, points2, num_iter, inlier_tol, translation_only=False):
   """
@@ -171,14 +162,20 @@ def ransac_homography(points1, points2, num_iter, inlier_tol, translation_only=F
               2) An Array with shape (S,) where S is the number of inliers,
                   containing the indices in pos1/pos2 of the maximal set of inlier matches found.
   """
-  min_score = 0.5
-  matched1, matched2 = match_features(points1, points2, min_score)
-  for i in numpy.random.choice( matched1, size=num_iter, replace=False):
-    H = estimate_rigid_transform(points1[i], points2[i])
-    apply_homography(points1[i], points2[i])
+  min_score, confs = 0.5, []
+  distance_fun = lambda H :  np.linalg.norm(apply_homography(points1, H) - points2, axis=1)
+  
+  for _ in range( num_iter ):
+    indices =np.random.choice( range(len(points1)) , size=1)
+    H = estimate_rigid_transform(points1[indices], points2[indices])
+    confs.append( ( H, sum((distance_fun(H) < inlier_tol)) ))
+    # H /= H[2][2]
 
+  ret_H, error = max(confs, key = lambda item : item[1] )
+  inliers = np.nonzero(distance_fun(ret_H) < inlier_tol)[0]
+  # print("inliers : {}".format(inliers))
+  return ret_H /  H[2][2], inliers
 
-  pass
 
 
 def display_matches(im1, im2, points1, points2, inliers):
@@ -190,8 +187,17 @@ def display_matches(im1, im2, points1, points2, inliers):
   :param pos2: An aray shape (N,2), containing N rows of [x,y] coordinates of matched points in im2.
   :param inliers: An array with shape (S,) of inlier matches.
   """
-  pass
+  concatenated = np.hstack((im1, im2))
+  plt.imshow(concatenated, cmap='gray')
 
+  # swap = lambda point : (point[1], point[0])
+
+  for j, (_p1, _p2) in enumerate(zip(points1, points2)):
+    _p2inImage2 = _p2 + np.array( [ im1.shape[1] , 0] )
+    plt.plot( [_p1[0] , _p2inImage2[0] ], [_p1[1], _p2inImage2[1] ],
+     color = { True: 'yellow' , False: 'blue'  }[  j in inliers ], lw = 0.4, ms = 5, marker ='o' )
+
+  plt.show()  
 
 from itertools import accumulate
 def accumulate_homographies(H_succesive, m):
@@ -206,11 +212,15 @@ def accumulate_homographies(H_succesive, m):
   :return: A list of M 3x3 homography matrices, 
     where H2m[i] transforms points from coordinate system i to coordinate system m
   """ 
+  ret = [np.eye(3)]
 
-  def conicdate( prev_matrix, next_matrix ):
-    ret = prev_matrix @ next_matrix
-    return ret/ret[2][2]
-  return reversed( accumulate( reversed( H_succesive[:m+1] ), conicdate )) + np.eye(3)
+  for i in range(m-1,-1,-1):
+    ret = [H_succesive[i] @ ret[0] ] + ret
+    ret[0] /= ret[0][2][2]
+  for i in range(m+1,len(H_succesive)):
+    ret = ret + [np.linalg.inv(H_succesive[i]) @ ret[-1] ] 
+    ret[-1] /= ret[-1][2][2]
+  return np.array(ret)
   
 
 def compute_bounding_box(homography, w, h):
@@ -222,8 +232,11 @@ def compute_bounding_box(homography, w, h):
   :return: 2x2 array, where the first row is [x,y] of the top left corner,
    and the second row is the [x,y] of the bottom right corner
   """
-  pass
-
+  points = np.array([ [x,y] for x,y in product([0,w-1], [0,h-1])])
+  trans_points = apply_homography(np.array(points), homography)
+  leftcor = [min(trans_points[:,0]), min(trans_points[:,1])]
+  rightcor = [max(trans_points[:,0]), max(trans_points[:,1])]
+  return np.array( [leftcor, rightcor ])
 
 def warp_channel(image, homography):
   """
@@ -232,7 +245,14 @@ def warp_channel(image, homography):
   :param homography: homograhpy.
   :return: A 2d warped image.
   """
-  pass
+  
+  leftcor, rightcor = compute_bounding_box(homography, image.shape[1], image.shape[0])
+  X, Y = np.meshgrid(np.arange(leftcor[0], rightcor[0]), np.arange(leftcor[1], rightcor[1]))
+  points = np.dstack((X,Y)).reshape(-1,2)
+  _map_back = apply_homography(points, np.linalg.inv(homography))
+  # inter_points = map_coordinates(image, [_map_back[:,1], _map_back[:,0]], order=1, prefilter=False)
+  return map_coordinates(image, [_map_back[:,1], _map_back[:,0]], order=1, prefilter=False).reshape(*Y.shape)
+
 
 
 def warp_image(image, homography):
@@ -355,7 +375,7 @@ class PanoramicVideoGenerator:
     """
     self.file_prefix = file_prefix
     self.files = [os.path.join(data_dir, '%s%03d.jpg' % (file_prefix, i + 1)) for i in range(num_images)]
-    self.files = list(filter(os.path.exists, self.files))[:2]
+    self.files = list(filter(os.path.exists, self.files))
     self.panoramas = None
     self.homographies = None
     print('found %d images' % len(self.files))
@@ -367,8 +387,16 @@ class PanoramicVideoGenerator:
     """
     # Extract feature point locations and descriptors.
     points_and_descriptors = []
+
+    # debug
+    self.images = [ ]
+
     for file in self.files:
       image = sol4_utils.read_image(file, 1)
+      
+      #debug
+      self.images.append(image)
+      
       self.h, self.w = image.shape
       pyramid, _ = sol4_utils.build_gaussian_pyramid(image, 3, 7)
       points_and_descriptors.append(find_features(pyramid))
@@ -381,7 +409,6 @@ class PanoramicVideoGenerator:
 
       # Find matching feature points.
       ind1, ind2 = match_features(desc1, desc2, .7)
-      print(ind1 , ind2 )
       points1, points2 = points1[ind1, :], points2[ind2, :]
 
       # Compute homography using RANSAC.
@@ -452,13 +479,14 @@ class PanoramicVideoGenerator:
         x_end = boundaries[0] + image_strip.shape[1]
         self.panoramas[panorama_index, y_offset:y_bottom, boundaries[0]:x_end] = image_strip
 
+        # self.show_panorama(panorama_index)
     # crop out areas not recorded from enough angles
     # assert will fail if there is overlap in field of view between the left most image and the right most image
     crop_left = int(self.bounding_boxes[0][1, 0])
     crop_right = int(self.bounding_boxes[-1][0, 0])
-    assert crop_left < crop_right, 'for testing your code with a few images do not crop.'
-    print(crop_left, crop_right)
-    self.panoramas = self.panoramas[:, :, crop_left:crop_right, :]
+    # assert crop_left < crop_right, 'for testing your code with a few images do not crop.'
+    # print(crop_left, crop_right)
+    # self.panoramas = self.panoramas[:, :, crop_left:crop_right, :]
 
 
   def save_panoramas_to_video(self):
